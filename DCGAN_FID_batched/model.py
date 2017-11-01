@@ -84,6 +84,7 @@ class DCGAN(object):
     self.g_bn2 = batch_norm(name='g_bn2')
     self.g_bn3 = batch_norm(name='g_bn3')
 
+    self.coord = None
     self.dataset_name = dataset_name
     self.input_fname_pattern = input_fname_pattern
     self.load_checkpoint = load_checkpoint
@@ -210,8 +211,8 @@ class DCGAN(object):
 
     # Init:
     tf.global_variables_initializer().run()
-    coord = tf.train.Coordinator()
-    tf.train.start_queue_runners(self.sess, coord)
+    self.coord = tf.train.Coordinator()
+    tf.train.start_queue_runners(self.sess, self.coord)
 
     # Summaries
     self.g_sum = tf.summary.merge([self.z_sum, self.d_fake_sum,
@@ -257,90 +258,95 @@ class DCGAN(object):
 
     start_time = time.time()
 
-    # Loop over epochs
-    for epoch in range(config.epoch):
+    try:
+      # Loop over epochs
+      for epoch in range(config.epoch):
 
-      # Assign learning rates for d and g
-      lrate =  config.learning_rate_d # * (config.lr_decay_rate_d ** epoch)
-      self.sess.run(tf.assign(self.learning_rate_d, lrate))
-      lrate =  config.learning_rate_g # * (config.lr_decay_rate_g ** epoch)
-      self.sess.run(tf.assign(self.learning_rate_g, lrate))
+        # Assign learning rates for d and g
+        lrate =  config.learning_rate_d # * (config.lr_decay_rate_d ** epoch)
+        self.sess.run(tf.assign(self.learning_rate_d, lrate))
+        lrate =  config.learning_rate_g # * (config.lr_decay_rate_g ** epoch)
+        self.sess.run(tf.assign(self.learning_rate_g, lrate))
 
-      # Loop over batches
-      for batch_idx in range(batch_nums):
-        # Update D network
-        _, summary_str = self.sess.run([self.d_optim, self.d_sum])
-        if np.mod(counter, 20) == 0:
-          self.writer.add_summary(summary_str, counter)
+        # Loop over batches
+        for batch_idx in range(batch_nums):
+          # Update D network
+          _, summary_str = self.sess.run([self.d_optim, self.d_sum])
+          if np.mod(counter, 20) == 0:
+            self.writer.add_summary(summary_str, counter)
 
-        # Update G network
-        _, summary_str = self.sess.run([self.g_optim, self.g_sum])
-        if np.mod(counter, 20) == 0:
-          self.writer.add_summary(summary_str, counter)
+          # Update G network
+          _, summary_str = self.sess.run([self.g_optim, self.g_sum])
+          if np.mod(counter, 20) == 0:
+            self.writer.add_summary(summary_str, counter)
 
-        errD_fake = self.d_loss_fake.eval()
-        errD_real = self.d_loss_real.eval()
-        errG = self.g_loss.eval()
+          errD_fake = self.d_loss_fake.eval()
+          errD_real = self.d_loss_real.eval()
+          errG = self.g_loss.eval()
 
-        # Print
-        if np.mod(counter, 100) == 0:
-          print("Epoch: [%2d] [%4d/%4d] time: %4.4f, d_loss: %.8f, g_loss: %.8f" \
-            % (epoch, batch_idx, batch_nums, time.time() - start_time, errD_fake+errD_real, errG))
+          # Print
+          if np.mod(counter, 100) == 0:
+            print("Epoch: [%2d] [%4d/%4d] time: %4.4f, d_loss: %.8f, g_loss: %.8f" \
+              % (epoch, batch_idx, batch_nums, time.time() - start_time, errD_fake+errD_real, errG))
 
-        # Save generated samples and FID
-        if np.mod(counter, config.fid_eval_steps) == 0:
+          # Save generated samples and FID
+          if np.mod(counter, config.fid_eval_steps) == 0:
 
-          # Save
-          try:
-            samples, d_loss, g_loss = self.sess.run(
-                [self.sampler, self.d_loss, self.g_loss])
-            save_images(samples, [8, 8], '{}/train_{:02d}_{:04d}.png'.format(config.sample_dir, epoch, batch_idx))
-            print("[Sample] d_loss: %.8f, g_loss: %.8f" % (d_loss, g_loss))
-          except Exception as e:
-            print(e)
-            print("sample image error!")
-
-          # FID
-          print("samples for incept", end="", flush=True)
-
-          samples = np.zeros((self.fid_n_samples, self.output_height, self.output_width, 3))
-          n_batches = self.fid_n_samples // self.fid_sample_batchsize
-          lo = 0
-          for btch in range(n_batches):
-            print("\rsamples for incept %d/%d" % (btch + 1, n_batches), end=" ", flush=True)
-            samples[lo:(lo+self.fid_sample_batchsize)] = self.sess.run(self.sampler_fid)
-            lo += self.fid_sample_batchsize
-
-          samples = (samples + 1.) * 127.5
-          print("ok")
-
-          mu_gen, sigma_gen = fid.calculate_activation_statistics( samples,
-                                                           self.sess,
-                                                           batch_size=self.fid_batch_size,
-                                                           verbose=self.fid_verbose)
-
-          print("calculate FID:", end=" ", flush=True)
-          try:
-              FID = fid.calculate_frechet_distance(mu_gen, sigma_gen, mu_real, sigma_real)
-          except Exception as e:
+            # Save
+            try:
+              samples, d_loss, g_loss = self.sess.run(
+                  [self.sampler, self.d_loss, self.g_loss])
+              save_images(samples, [8, 8], '{}/train_{:02d}_{:04d}.png'.format(config.sample_dir, epoch, batch_idx))
+              print("[Sample] d_loss: %.8f, g_loss: %.8f" % (d_loss, g_loss))
+            except Exception as e:
               print(e)
-              FID=500
+              print("sample image error!")
 
-          print(FID)
+            # FID
+            print("samples for incept", end="", flush=True)
 
-          # Update event log with FID
-          self.sess.run(tf.assign(self.fid, FID))
-          summary_str = self.sess.run(self.fid_sum)
-          self.writer.add_summary(summary_str, counter)
+            samples = np.zeros((self.fid_n_samples, self.output_height, self.output_width, 3))
+            n_batches = self.fid_n_samples // self.fid_sample_batchsize
+            lo = 0
+            for btch in range(n_batches):
+              print("\rsamples for incept %d/%d" % (btch + 1, n_batches), end=" ", flush=True)
+              samples[lo:(lo+self.fid_sample_batchsize)] = self.sess.run(self.sampler_fid)
+              lo += self.fid_sample_batchsize
 
-        # Save checkpoint
-        if (counter != 0) and (np.mod(counter, 2000) == 0):
-          self.save(config.checkpoint_dir, counter)
+            samples = (samples + 1.) * 127.5
+            print("ok")
 
-        counter += 1
+            mu_gen, sigma_gen = fid.calculate_activation_statistics(samples,
+                                                             self.sess,
+                                                             batch_size=self.fid_batch_size,
+                                                             verbose=self.fid_verbose)
 
-    # When done, ask the threads to stop.
-    coord.request_stop()
+            print("calculate FID:", end=" ", flush=True)
+            try:
+                FID = fid.calculate_frechet_distance(mu_gen, sigma_gen, mu_real, sigma_real)
+            except Exception as e:
+                print(e)
+                FID=500
+
+            print(FID)
+
+            # Update event log with FID
+            self.sess.run(tf.assign(self.fid, FID))
+            summary_str = self.sess.run(self.fid_sum)
+            self.writer.add_summary(summary_str, counter)
+
+          # Save checkpoint
+          if (counter != 0) and (np.mod(counter, 2000) == 0):
+            self.save(config.checkpoint_dir, counter)
+
+          counter += 1
+    except KeyboardInterrupt as e:
+      self.save(config.checkpoint_dir, counter)
+    except Exception as e:
+      print(e)
+    finally:
+      # When done, ask the threads to stop.
+      self.coord.request_stop()
 
   # Discriminator
   def discriminator(self, image, y=None, reuse=False):
