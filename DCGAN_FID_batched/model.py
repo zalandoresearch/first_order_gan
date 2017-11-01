@@ -255,6 +255,9 @@ class DCGAN(object):
     batch_nums = min(len(self.paths), config.train_size) // config.batch_size
 
     counter = self.counter_start
+    errD_fake = 0.
+    errD_real = 0.
+    errG = 0.
 
     start_time = time.time()
 
@@ -271,23 +274,27 @@ class DCGAN(object):
         # Loop over batches
         for batch_idx in range(batch_nums):
           # Update D network
-          _, summary_str = self.sess.run([self.d_optim, self.d_sum])
+          _, errD_fake_, errD_real_, summary_str = self.sess.run(
+              [self.d_optim, self.d_loss_fake, self.d_loss_real, self.d_sum])
           if np.mod(counter, 20) == 0:
             self.writer.add_summary(summary_str, counter)
 
           # Update G network
-          _, summary_str = self.sess.run([self.g_optim, self.g_sum])
+          _, errG_, summary_str = self.sess.run([self.g_optim, self.g_loss, self.g_sum])
           if np.mod(counter, 20) == 0:
             self.writer.add_summary(summary_str, counter)
 
-          errD_fake = self.d_loss_fake.eval()
-          errD_real = self.d_loss_real.eval()
-          errG = self.g_loss.eval()
+          errD_fake += errD_fake_
+          errD_real += errD_real_
+          errG += errG_
 
           # Print
           if np.mod(counter, 100) == 0:
             print("Epoch: [%2d] [%4d/%4d] time: %4.4f, d_loss: %.8f, g_loss: %.8f" \
-              % (epoch, batch_idx, batch_nums, time.time() - start_time, errD_fake+errD_real, errG))
+              % (epoch, batch_idx, batch_nums, time.time() - start_time, (errD_fake+errD_real) / 100., errG / 100.))
+            errD_fake = 0.
+            errD_real = 0.
+            errG = 0.
 
           # Save generated samples and FID
           if np.mod(counter, config.fid_eval_steps) == 0:
