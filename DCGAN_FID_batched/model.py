@@ -1,4 +1,5 @@
 import os
+import sys
 import time
 import math
 from glob import glob
@@ -6,10 +7,12 @@ import tensorflow as tf
 import numpy as np
 from random import sample
 
+from data_loader import get_loader
 from ops import *
 from utils import *
 
 # import fid
+sys.path.append(os.path.abspath('../'))
 import fid
 
 def conv_out_size_same(size, stride):
@@ -89,6 +92,7 @@ class DCGAN(object):
     self.log_dir = log_dir
     self.stats_path = stats_path
     self.data_path = data_path
+    self.file_paths = []
     self.fid_n_samples=fid_n_samples
     self.fid_sample_batchsize=fid_sample_batchsize
     self.fid_batch_size = fid_batch_size
@@ -107,30 +111,22 @@ class DCGAN(object):
     self.learning_rate_d = tf.Variable(0.0, trainable=False)
     self.learning_rate_g = tf.Variable(0.0, trainable=False)
 
-    # Placeholders
+    # Inputs
+    self.inputs, self.paths = get_loader(self.data_path, self.dataset_name, self.batch_size,
+                                         self.output_height, 'NHWC', split=None)
+    inputs = self.inputs
 
-    if self.is_crop:
-      image_dims = [self.output_height, self.output_width, self.c_dim]
-    else:
-      image_dims = [self.input_height, self.input_width, self.c_dim]
-
-    self.inputs = tf.placeholder(
-      tf.float32, [self.batch_size] + image_dims, name='real_images')
-    self.sample_inputs = tf.placeholder(
-      tf.float32, [self.sample_num] + image_dims, name='sample_inputs')
-
-    self.z = tf.placeholder(
-      tf.float32, [None, self.z_dim], name='z')
+    # Random inputs
+    self.z = tf.random_normal((self.batch_size, self.z_dim), 0., 1.0, dtype=tf.float32, name='z')
+    self.z_fid  = tf.random_normal((self.fid_sample_batchsize, self.z_dim), 0., 1.0, 
+                                   dtype=tf.float32, name='z_fid')
+    self.z_samp = tf.random_normal((self.sample_num, self.z_dim), 0., 1.0, dtype=tf.float32, name='z_samp')
     self.z_sum = tf.summary.histogram("z", self.z)
 
-    self.z_fid = tf.placeholder(
-      tf.float32, [None, self.z_dim], name='z_fid')
+    # Placeholders
 
     self.fid = tf.Variable(0.0, trainable=False)
 
-    # Inputs
-    inputs = self.inputs
-    sample_inputs = self.sample_inputs
 
     # Discriminator and generator
     if self.y_dim:
@@ -143,7 +139,7 @@ class DCGAN(object):
       self.D_real, self.D_logits_real = self.discriminator(inputs)
 
       self.sampler_fid = self.sampler_func(self.z_fid, self.fid_sample_batchsize)
-      self.sampler = self.sampler_func(self.z, self.batch_size)
+      self.sampler = self.sampler_func(self.z_samp, self.sample_num)
       self.D_fake, self.D_logits_fake = self.discriminator(self.G, reuse=True)
 
     # Summaries
@@ -214,6 +210,8 @@ class DCGAN(object):
 
     # Init:
     tf.global_variables_initializer().run()
+    coord = tf.train.Coordinator()
+    tf.train.start_queue_runners(self.sess, coord)
 
     # Summaries
     self.g_sum = tf.summary.merge([self.z_sum, self.d_fake_sum,
@@ -238,52 +236,13 @@ class DCGAN(object):
   def train(self, config):
     """Train DCGAN"""
 
+    assert len(self.paths) > 0, 'no data loaded, was model not built?'
     print("load train stats.. ", end="", flush=True)
     # load precalculated training set statistics
     f = np.load(self.stats_path)
     mu_real, sigma_real = f['mu'][:], f['sigma'][:]
     f.close()
     print("ok")
-
-    if config.dataset == 'mnist':
-      print("scan files", end=" ", flush=True)
-      data_X, data_y = self.load_mnist()
-    else:
-      if (config.dataset == "celebA") or (config.dataset == "cifar10"):
-        print("scan files", end=" ", flush=True)
-        data = glob(os.path.join(self.data_path, self.input_fname_pattern))
-      else:
-        if config.dataset == "lsun":
-          print("scan files")
-          data = []
-          for i in range(304):
-            print("\r%d" % i, end="", flush=True)
-            data += glob(os.path.join(self.data_path, str(i), self.input_fname_pattern))
-        else:
-          print("Please specify dataset in run.sh [mnist, celebA, lsun, cifar10]")
-          raise SystemExit()
-
-    print()
-    print("%d images found" % len(data))
-
-    # Z sample
-    #sample_z = np.random.normal(0, 1.0, size=(self.sample_num , self.z_dim))
-    sample_z = np.random.uniform(-1.0, 1.0, size=(self.sample_num , self.z_dim))
-
-    # Input samples
-    sample_files = data[0:self.sample_num]
-    sample = [
-          get_image(sample_file,
-                    input_height=self.input_height,
-                    input_width=self.input_width,
-                    resize_height=self.output_height,
-                    resize_width=self.output_width,
-                    is_crop=self.is_crop,
-                    is_grayscale=self.is_grayscale) for sample_file in sample_files]
-    if (self.is_grayscale):
-      sample_inputs = np.array(sample).astype(np.float32)[:, :, :, None]
-    else:
-      sample_inputs = np.array(sample).astype(np.float32)
 
     if self.load_checkpoint:
       if self.load(self.checkpoint_dir):
@@ -292,8 +251,7 @@ class DCGAN(object):
         print(" [!] Load failed...")
 
     # Batch preparing
-    batch_nums = min(len(data), config.train_size) // config.batch_size
-    data_idx = list(range(len(data)))
+    batch_nums = min(len(self.paths), config.train_size) // config.batch_size
 
     counter = self.counter_start
 
@@ -308,46 +266,21 @@ class DCGAN(object):
       lrate =  config.learning_rate_g # * (config.lr_decay_rate_g ** epoch)
       self.sess.run(tf.assign(self.learning_rate_g, lrate))
 
-      # Shuffle the data indices
-      np.random.shuffle(data_idx)
-
       # Loop over batches
       for batch_idx in range(batch_nums):
-
-        # Prepare batch
-        idx = data_idx[batch_idx * config.batch_size:(batch_idx + 1) * config.batch_size]
-        batch = [
-              get_image(data[i],
-                        input_height=self.input_height,
-                        input_width=self.input_width,
-                        resize_height=self.output_height,
-                        resize_width=self.output_width,
-                        is_crop=self.is_crop,
-                        is_grayscale=self.is_grayscale) for i in idx]
-        if (self.is_grayscale):
-          batch_images = np.array(batch).astype(np.float32)[:, :, :, None]
-        else:
-          batch_images = np.array(batch).astype(np.float32)
-
-        #batch_z = np.random.normal(0, 1.0, size=(config.batch_size , self.z_dim)).astype(np.float32)
-        batch_z = np.random.uniform(-1.0, 1.0, size=(config.batch_size , self.z_dim)).astype(np.float32)
-
         # Update D network
-        _, summary_str = self.sess.run([self.d_optim, self.d_sum],
-                                       feed_dict={self.inputs: batch_images,
-                                                  self.z: batch_z})
+        _, summary_str = self.sess.run([self.d_optim, self.d_sum])
         if np.mod(counter, 20) == 0:
           self.writer.add_summary(summary_str, counter)
 
         # Update G network
-        _, summary_str = self.sess.run([self.g_optim, self.g_sum],
-                                       feed_dict={self.z: batch_z})
+        _, summary_str = self.sess.run([self.g_optim, self.g_sum])
         if np.mod(counter, 20) == 0:
           self.writer.add_summary(summary_str, counter)
 
-        errD_fake = self.d_loss_fake.eval({ self.z: batch_z })
-        errD_real = self.d_loss_real.eval({ self.inputs: batch_images })
-        errG = self.g_loss.eval({self.z: batch_z})
+        errD_fake = self.d_loss_fake.eval()
+        errD_real = self.d_loss_real.eval()
+        errG = self.g_loss.eval()
 
         # Print
         if np.mod(counter, 100) == 0:
@@ -360,9 +293,7 @@ class DCGAN(object):
           # Save
           try:
             samples, d_loss, g_loss = self.sess.run(
-                [self.sampler, self.d_loss, self.g_loss],
-                feed_dict={self.z: sample_z,
-                           self.inputs: sample_inputs})
+                [self.sampler, self.d_loss, self.g_loss])
             save_images(samples, [8, 8], '{}/train_{:02d}_{:04d}.png'.format(config.sample_dir, epoch, batch_idx))
             print("[Sample] d_loss: %.8f, g_loss: %.8f" % (d_loss, g_loss))
           except Exception as e:
@@ -377,10 +308,7 @@ class DCGAN(object):
           lo = 0
           for btch in range(n_batches):
             print("\rsamples for incept %d/%d" % (btch + 1, n_batches), end=" ", flush=True)
-            #sample_z_fid = np.random.normal(0, 1.0, size=(self.fid_sample_batchsize, self.z_dim))
-            sample_z_fid = np.random.uniform(-1.0, 1.0, size=(self.fid_sample_batchsize, self.z_dim))
-            samples[lo:(lo+self.fid_sample_batchsize)] = self.sess.run( self.sampler_fid,
-                                     feed_dict={self.z_fid: sample_z_fid})
+            samples[lo:(lo+self.fid_sample_batchsize)] = self.sess.run(self.sampler_fid)
             lo += self.fid_sample_batchsize
 
           samples = (samples + 1.) * 127.5
@@ -410,6 +338,9 @@ class DCGAN(object):
           self.save(config.checkpoint_dir, counter)
 
         counter += 1
+
+    # When done, ask the threads to stop.
+    coord.request_stop()
 
   # Discriminator
   def discriminator(self, image, y=None, reuse=False):
