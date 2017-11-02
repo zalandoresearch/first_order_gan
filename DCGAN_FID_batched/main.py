@@ -46,13 +46,18 @@ flags.DEFINE_integer("fid_batch_size", 100, "Batchsize used for FID calculation 
 flags.DEFINE_boolean("fid_verbose", True, "Report current state of FID calculation [True]")
 flags.DEFINE_integer("fid_eval_steps", 1000, "Evaluate FID after this number of minibatches")
 
-
+# added parameters for wasserstein GAN
+flags.DEFINE_string("gan_method", "regular_gan", "Type of gan, 'penalized_wgan', 'improved_wgan' and 'regular_gan' possible")
+flags.DEFINE_float("lipschitz_penalty", 0.1, "Weight of Lipschitz-penalty in improved wasserstein setting")
+flags.DEFINE_float("gradient_penalty", 0.1, "Weight of gradient-penalty in penalized and improved wasserstein settings")
+flags.DEFINE_boolean("optimize_gradient", False, "When learning the generator, also optimize (increase) the penalty")
+flags.DEFINE_boolean("discriminator_batch_norm", True, "Use batch norm for discriminator")
+flags.DEFINE_integer("num_discriminator_updates", 1, "Number of times to update the discriminator / critc before doing a generator update step")
 FLAGS = flags.FLAGS
 
 def main(_):
 
   pp.pprint(flags.FLAGS.__flags)
-
   # Create directories if necessary
   if not os.path.exists(FLAGS.log_dir):
     print("*** create log dir %s" % FLAGS.log_dir)
@@ -100,6 +105,9 @@ def main(_):
           batch_size_m=FLAGS.batch_size_m,
           y_dim=10,
           c_dim=1,
+          gan_method=FLAGS.gan_method,
+          lipschitz_penalty=FLAGS.lipschitz_penalty,
+          discriminator_batch_norm=FLAGS.discriminator_batch_norm,
           dataset_name=FLAGS.dataset,
           input_fname_pattern=FLAGS.input_fname_pattern,
           is_crop=FLAGS.is_crop,
@@ -112,6 +120,7 @@ def main(_):
           fid_sample_batchsize=FLAGS.fid_sample_batchsize,
           fid_batch_size=FLAGS.fid_batch_size,
           fid_verbose=FLAGS.fid_verbose,
+          num_discriminator_updates=FLAGS.num_discriminator_updates,
           beta1=FLAGS.beta1)
     else:
       dcgan = DCGAN(
@@ -122,6 +131,9 @@ def main(_):
           output_height=FLAGS.output_height,
           batch_size=FLAGS.batch_size,
           c_dim=FLAGS.c_dim,
+          gan_method=FLAGS.gan_method,
+          lipschitz_penalty=FLAGS.lipschitz_penalty,
+          discriminator_batch_norm=FLAGS.discriminator_batch_norm,
           dataset_name=FLAGS.dataset,
           input_fname_pattern=FLAGS.input_fname_pattern,
           is_crop=FLAGS.is_crop,
@@ -136,6 +148,7 @@ def main(_):
           fid_sample_batchsize=FLAGS.fid_sample_batchsize,
           fid_batch_size=FLAGS.fid_batch_size,
           fid_verbose=FLAGS.fid_verbose,
+          num_discriminator_updates=FLAGS.num_discriminator_updates,
           beta1=FLAGS.beta1)
 
     if FLAGS.is_train:

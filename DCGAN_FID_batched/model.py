@@ -24,7 +24,12 @@ class DCGAN(object):
          output_height=64, output_width=64,
          y_dim=None, z_dim=100, gf_dim=64, df_dim=64,
          gfc_dim=1024, dfc_dim=1024, c_dim=3,
+         gan_method='regular_gan',
+         lipschitz_penalty=0.1,
+         gradient_penalty=0.1,
+         optimize_penalty=False,
          dataset_name='default',
+         discriminator_batch_norm=True,
          input_fname_pattern='*.jpg',
          load_checkpoint=False, counter_start=0,
          checkpoint_dir=None,
@@ -36,6 +41,7 @@ class DCGAN(object):
          fid_sample_batchsize=5000,
          fid_batch_size=500,
          fid_verbose=False,
+         num_discriminator_updates=1,
          beta1=0.5):
     """
 
@@ -49,7 +55,16 @@ class DCGAN(object):
       gfc_dim: (optional) Dimension of gen units for for fully connected layer. [1024]
       dfc_dim: (optional) Dimension of discrim units for fully connected layer. [1024]
       c_dim: (optional) Dimension of image color. For grayscale input, set to 1. [3]
+      gan_method: (optional) Type of gan, penalized_wgan, improved_wgan and regular_gan possible [regular_gan]
+      lipschitz_penalty: (optional) Weight of Lipschitz-penalty in penalized wasserstein and setting [0.1]
+      gradient_penalty: (optional) Weight of gradient-penalty in penalized and improved wasserstein setting [0.1]
+      optimize_penalty: (optional) When learning the generator, also optimize (increase) the penalty [False]
     """
+    assert lipschitz_penalty >= 0,'the lipschitz penalty must be non-negative'
+    assert gradient_penalty >= 0,'the lipschitz penalty must be non-negative'
+    assert gan_method in ['penalized_wgan', 'improved_wgan', 'regular_gan'], "the " \
+      "gan method must be of type 'penalized_wgan', 'improved_wgan' or 'regular_gan', not " + str(gan_method)
+    assert num_discriminator_updates >= 1, 'num_discriminator_updates must be at least 1'
 
     self.sess = sess
     self.is_crop = is_crop
@@ -75,9 +90,14 @@ class DCGAN(object):
     self.c_dim = c_dim
 
     # Batch normalization : deals with poor initialization helps gradient flow
-    self.d_bn1 = batch_norm(name='d_bn1')
-    self.d_bn2 = batch_norm(name='d_bn2')
-    self.d_bn3 = batch_norm(name='d_bn3')
+    if discriminator_batch_norm:
+      self.d_bn1 = batch_norm(name='d_bn1')
+      self.d_bn2 = batch_norm(name='d_bn2')
+      self.d_bn3 = batch_norm(name='d_bn3')
+    else:
+      self.d_bn1 = lambda x: tf.identity(x, name='d_bn1_id')
+      self.d_bn2 = lambda x: tf.identity(x, name='d_bn2_id')
+      self.d_bn3 = lambda x: tf.identity(x, name='d_bn3_id')
 
     self.g_bn0 = batch_norm(name='g_bn0')
     self.g_bn1 = batch_norm(name='g_bn1')
@@ -85,6 +105,11 @@ class DCGAN(object):
     self.g_bn3 = batch_norm(name='g_bn3')
 
     self.coord = None
+    self.gan_method = gan_method
+    self.lipschitz_penalty = lipschitz_penalty
+    self.gradient_penalty  = gradient_penalty
+    self.optimize_penalty = optimize_penalty
+    self.num_discriminator_updates = num_discriminator_updates
     self.dataset_name = dataset_name
     self.input_fname_pattern = input_fname_pattern
     self.load_checkpoint = load_checkpoint
@@ -142,6 +167,14 @@ class DCGAN(object):
       self.sampler_fid = self.sampler_func(self.z_fid, self.fid_sample_batchsize)
       self.sampler = self.sampler_func(self.z_samp, self.sample_num)
       self.D_fake, self.D_logits_fake = self.discriminator(self.G, reuse=True)
+      
+      alpha = tf.random_uniform(
+        shape=[self.batch_size,1,1,1],
+        minval=0.,
+        maxval=0.01
+      )
+      self.G_interpolate = alpha * inputs + (1. - alpha) * self.G
+      self.D_interpolate, self.D_logits_interpolate = self.discriminator(self.G_interpolate, reuse=True)
 
     # Summaries
     self.d_real_sum = tf.summary.histogram("d_real", self.D_real)
@@ -154,24 +187,76 @@ class DCGAN(object):
       except:
         return tf.nn.sigmoid_cross_entropy_with_logits(logits=x, targets=y)
 
-    # Discriminator Loss Real
-    self.d_loss_real = tf.reduce_mean(
-      sigmoid_cross_entropy_with_logits(self.D_logits_real, tf.ones_like(self.D_real)))
-    # Discriminator Loss Fake
-    self.d_loss_fake = tf.reduce_mean(
-      sigmoid_cross_entropy_with_logits(self.D_logits_fake, tf.zeros_like(self.D_fake)))
-    # Generator Loss
-    self.g_loss = tf.reduce_mean(
-      sigmoid_cross_entropy_with_logits(self.D_logits_fake, tf.ones_like(self.D_fake)))
+    # Discriminator Loss Penalty
+    self.d_lipschitz_penalty_loss = tf.zeros([])
+    self.d_gradient_penalty_loss  = tf.zeros([])
+
+    if self.gan_method == 'penalized_wgan':    
+      # Discriminator Loss Real and Fake
+      self.d_loss_real = -1 * tf.reduce_mean(self.D_logits_real)
+      # Discriminator Loss Fake
+      self.d_loss_fake = tf.reduce_mean(self.D_logits_interpolate)
+      # Generator Loss
+      self.g_loss = -1 * tf.reduce_mean(self.D_logits_interpolate)
+
+      # Discriminator Lipschitz Loss Penalty
+      top = tf.squeeze(self.D_logits_real - self.D_logits_interpolate)
+      
+      # L2 distance between real and fake inputs
+      bot = tf.squeeze(tf.sqrt(tf.reduce_sum(tf.square(inputs - self.G_interpolate), axis=[1,2,3])))
+
+      # If bot == 0 return 0, else return top / bot
+      diff_penalty = tf.where(tf.less(bot, 10e-9 * tf.ones_like(top,dtype=tf.float32)), tf.zeros_like(top,dtype=tf.float32), tf.square(top) / bot)
+      self.d_lipschitz_penalty_loss = self.lipschitz_penalty * tf.reduce_mean(diff_penalty)
+
+      # Discriminator Gradient Loss Penalty
+      gradients = tf.gradients(self.D_logits_interpolate, [self.G_interpolate])[0]
+      slopes = tf.sqrt(tf.reduce_sum(tf.square(gradients), reduction_indices=[1,2,3]))
+      gradient_penalty = tf.reduce_mean(tf.square(slopes-(1. / (2. * self.lipschitz_penalty))))
+      self.d_gradient_penalty_loss = self.gradient_penalty * gradient_penalty
+
+    if self.gan_method == 'improved_wgan':
+      # Discriminator Loss Real and Fake
+      self.d_loss_real = -1 * tf.reduce_mean(self.D_logits_real)
+      # Discriminator Loss Fake
+      self.d_loss_fake = tf.reduce_mean(self.D_logits_fake)
+      # Generator Loss
+      self.g_loss = -1 * tf.reduce_mean(self.D_logits_fake)
+      # Discriminator Loss Penalty
+      alpha = tf.random_uniform(
+        shape=[self.batch_size,1],
+        minval=0.,
+        maxval=1.
+      )
+      interpolates = alpha*inputs + ((1-alpha)*self.G)
+      _, disc_interpolates = self.discriminator(interpolates, reuse=True)
+      gradients = tf.gradients(disc_interpolates, [interpolates])[0]
+      slopes = tf.sqrt(tf.reduce_sum(tf.square(gradients), reduction_indices=[1,2,3]))
+      gradient_penalty = tf.reduce_mean(tf.square(slopes-1.))
+      self.d_gradient_penalty_loss = self.gradient_penalty * gradient_penalty
+
+    if self.gan_method == 'regular_gan':
+      # Discriminator Loss Real
+      self.d_loss_real = tf.reduce_mean(
+        sigmoid_cross_entropy_with_logits(self.D_logits_real, tf.ones_like(self.D_real)))
+      # Discriminator Loss Fake
+      self.d_loss_fake = tf.reduce_mean(
+        sigmoid_cross_entropy_with_logits(self.D_logits_fake, tf.zeros_like(self.D_fake)))
+      # Generator Loss
+      self.g_loss = tf.reduce_mean(
+        sigmoid_cross_entropy_with_logits(self.D_logits_fake, tf.ones_like(self.D_fake)))
 
     self.d_loss_real_sum = tf.summary.scalar("d_loss_real", self.d_loss_real)
     self.d_loss_fake_sum = tf.summary.scalar("d_loss_fake", self.d_loss_fake)
 
     # Discriminator Loss Combined
-    self.d_loss = self.d_loss_real + self.d_loss_fake
+    self.d_loss = self.d_loss_real + self.d_loss_fake + self.d_lipschitz_penalty_loss + self.d_gradient_penalty_loss
 
     self.g_loss_sum = tf.summary.scalar("g_loss", self.g_loss)
     self.d_loss_sum = tf.summary.scalar("d_loss", self.d_loss)
+
+    self.d_gradient_penalty_loss_sum = tf.summary.scalar("d_gradient_penalty_loss", self.d_gradient_penalty_loss)
+    self.d_lipschitz_penalty_loss_sum = tf.summary.scalar("d_lipschitz_penalty_loss", self.d_lipschitz_penalty_loss)
 
     self.lrate_sum_d = tf.summary.scalar('learning rate d', self.learning_rate_d)
     self.lrate_sum_g = tf.summary.scalar('learning rate g', self.learning_rate_g)
@@ -200,7 +285,10 @@ class DCGAN(object):
       sum_grad_d.append(tf.summary.scalar("grad_l2_d_%d_%s" % (i, vars_.name), grad_l2))
 
     # Generator
-    grads_and_vars = opt_g.compute_gradients(self.g_loss, var_list=self.g_vars)
+    if self.optimize_penalty:
+      grads_and_vars = opt_g.compute_gradients(self.g_loss - self.d_lipschitz_penalty_loss - self.d_gradient_penalty_loss, var_list=self.g_vars)
+    else:
+      grads_and_vars = opt_g.compute_gradients(self.g_loss, var_list=self.g_vars)
     self.g_optim = opt_g.apply_gradients(grads_and_vars)
 
     # Gradient summaries generator
@@ -218,7 +306,8 @@ class DCGAN(object):
     self.g_sum = tf.summary.merge([self.z_sum, self.d_fake_sum,
       self.G_sum, self.d_loss_fake_sum, self.g_loss_sum, self.lrate_sum_g] + sum_grad_g)
     self.d_sum = tf.summary.merge(
-        [self.z_sum, self.d_real_sum, self.d_loss_real_sum, self.d_loss_sum, self.lrate_sum_d] + sum_grad_d)
+        [self.z_sum, self.d_real_sum, self.d_loss_real_sum, self.d_loss_sum, self.lrate_sum_d,
+        self.d_gradient_penalty_loss_sum, self.d_lipschitz_penalty_loss_sum] + sum_grad_d)
     self.writer = tf.summary.FileWriter(self.log_dir, self.sess.graph)
 
 
@@ -258,6 +347,8 @@ class DCGAN(object):
     errD_fake = 0.
     errD_real = 0.
     errG = 0.
+    penD_gradient = 0.
+    penD_lipschitz = 0.
 
     start_time = time.time()
 
@@ -274,8 +365,12 @@ class DCGAN(object):
         # Loop over batches
         for batch_idx in range(batch_nums):
           # Update D network
-          _, errD_fake_, errD_real_, summary_str = self.sess.run(
-              [self.d_optim, self.d_loss_fake, self.d_loss_real, self.d_sum])
+          _, errD_fake_, errD_real_, summary_str, penD_gradient_, penD_lipschitz_ = self.sess.run(
+              [self.d_optim, self.d_loss_fake, self.d_loss_real, self.d_sum,
+              self.d_gradient_penalty_loss, self.d_lipschitz_penalty_loss])
+          for i in range(self.num_discriminator_updates - 1):
+            self.sess.run([self.d_optim, self.d_loss_fake, self.d_loss_real, self.d_sum,
+                           self.d_gradient_penalty_loss, self.d_lipschitz_penalty_loss])
           if np.mod(counter, 20) == 0:
             self.writer.add_summary(summary_str, counter)
 
@@ -287,14 +382,19 @@ class DCGAN(object):
           errD_fake += errD_fake_
           errD_real += errD_real_
           errG += errG_
+          penD_gradient += penD_gradient_
+          penD_lipschitz += penD_lipschitz_
 
           # Print
           if np.mod(counter, 100) == 0:
-            print("Epoch: [%2d] [%4d/%4d] time: %4.4f, d_loss: %.8f, g_loss: %.8f" \
-              % (epoch, batch_idx, batch_nums, time.time() - start_time, (errD_fake+errD_real) / 100., errG / 100.))
+            print("Epoch: [%2d] [%4d/%4d] time: %4.4f, d_loss: %.8f, lipschitz_pen: %.8f, gradient_pen: %.8f, g_loss: %.8f" \
+              % (epoch, batch_idx, batch_nums, time.time() - start_time, (errD_fake+errD_real) / 100.,
+                 penD_lipschitz / 100., penD_gradient / 100., errG / 100.))
             errD_fake = 0.
             errD_real = 0.
             errG = 0.
+            penD_gradient = 0.
+            penD_lipschitz = 0.
 
           # Save generated samples and FID
           if np.mod(counter, config.fid_eval_steps) == 0:
