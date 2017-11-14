@@ -53,10 +53,7 @@ def get_loader(root, dataset_name, batch_size, scale_size, data_format, split=No
 
     if dataset_name in ['CelebA']:
         queue = tf.image.crop_to_bounding_box(queue, 50, 25, 128, 128)
-        queue = tf.image.resize_bilinear(queue, [scale_size, scale_size])
-    else:
-        pass
-        #queue = tf.image.resize_nearest_neighbor(queue, [scale_size, scale_size])
+    queue = tf.image.resize_bilinear(queue, [scale_size, scale_size])
 
     if data_format == 'NCHW':
         queue = tf.transpose(queue, [0, 3, 1, 2])
