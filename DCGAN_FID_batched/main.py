@@ -50,9 +50,10 @@ flags.DEFINE_integer("fid_eval_steps", 1000, "Evaluate FID after this number of 
 flags.DEFINE_string("gan_method", "regular_gan", "Type of gan, 'penalized_wgan', 'improved_wgan' and 'regular_gan' possible")
 flags.DEFINE_float("lipschitz_penalty", 0.1, "Weight of Lipschitz-penalty in improved wasserstein setting")
 flags.DEFINE_float("gradient_penalty", 0.1, "Weight of gradient-penalty in penalized and improved wasserstein settings")
-flags.DEFINE_boolean("optimize_gradient", False, "When learning the generator, also optimize (increase) the penalty")
+flags.DEFINE_boolean("optimize_penalty", False, "When learning the generator, also optimize (increase) the penalty")
 flags.DEFINE_boolean("discriminator_batch_norm", True, "Use batch norm for discriminator")
 flags.DEFINE_integer("num_discriminator_updates", 1, "Number of times to update the discriminator / critc before doing a generator update step")
+flags.DEFINE_boolean("calculate_slope", True, "Explicitly claculate target slope for discriminator in gradient penalty, otherwise set to 1/(2\lambda)")
 FLAGS = flags.FLAGS
 
 def main(_):
@@ -107,7 +108,10 @@ def main(_):
           c_dim=1,
           gan_method=FLAGS.gan_method,
           lipschitz_penalty=FLAGS.lipschitz_penalty,
+          gradient_penalty=FLAGS.gradient_penalty,
           discriminator_batch_norm=FLAGS.discriminator_batch_norm,
+          optimize_penalty=FLAGS.optimize_penalty,
+          calculate_slope=FLAGS.calculate_slope,
           dataset_name=FLAGS.dataset,
           input_fname_pattern=FLAGS.input_fname_pattern,
           is_crop=FLAGS.is_crop,
@@ -133,7 +137,10 @@ def main(_):
           c_dim=FLAGS.c_dim,
           gan_method=FLAGS.gan_method,
           lipschitz_penalty=FLAGS.lipschitz_penalty,
+          gradient_penalty=FLAGS.gradient_penalty,
           discriminator_batch_norm=FLAGS.discriminator_batch_norm,
+          optimize_penalty=FLAGS.optimize_penalty,
+          calculate_slope=FLAGS.calculate_slope,
           dataset_name=FLAGS.dataset,
           input_fname_pattern=FLAGS.input_fname_pattern,
           is_crop=FLAGS.is_crop,
