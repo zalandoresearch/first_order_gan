@@ -18,6 +18,9 @@ import fid
 def conv_out_size_same(size, stride):
   return int(math.ceil(float(size) / float(stride)))
 
+def l2norm(x, axis=[1,2,3]):
+  return tf.squeeze(tf.sqrt(tf.reduce_sum(tf.square(x), axis=axis)))
+
 class DCGAN(object):
   def __init__(self, sess, input_height=108, input_width=108, is_crop=True,
          batch_size=64, sample_num = 64,
@@ -28,6 +31,7 @@ class DCGAN(object):
          lipschitz_penalty=0.1,
          gradient_penalty=0.1,
          optimize_penalty=False,
+         calculate_slope=True,
          dataset_name='default',
          discriminator_batch_norm=True,
          input_fname_pattern='*.jpg',
@@ -59,6 +63,7 @@ class DCGAN(object):
       lipschitz_penalty: (optional) Weight of Lipschitz-penalty in penalized wasserstein and setting [0.1]
       gradient_penalty: (optional) Weight of gradient-penalty in penalized and improved wasserstein setting [0.1]
       optimize_penalty: (optional) When learning the generator, also optimize (increase) the penalty [False]
+      calculate_slope: (optional) Explicitly claculate target slope for discriminator in gradient penalty, otherwise set to 1/(2\lambda) [False]
     """
     assert lipschitz_penalty >= 0,'the lipschitz penalty must be non-negative'
     assert gradient_penalty >= 0,'the lipschitz penalty must be non-negative'
@@ -109,6 +114,7 @@ class DCGAN(object):
     self.lipschitz_penalty = lipschitz_penalty
     self.gradient_penalty  = gradient_penalty
     self.optimize_penalty = optimize_penalty
+    self.calculate_slope = calculate_slope
     self.num_discriminator_updates = num_discriminator_updates
     self.dataset_name = dataset_name
     self.input_fname_pattern = input_fname_pattern
@@ -190,6 +196,7 @@ class DCGAN(object):
     # Discriminator Loss Penalty
     self.d_lipschitz_penalty_loss = tf.zeros([])
     self.d_gradient_penalty_loss  = tf.zeros([])
+    self.d_mean_slope_target      = tf.zeros([])
 
     if self.gan_method == 'penalized_wgan':    
       # Discriminator Loss Real and Fake
@@ -203,7 +210,7 @@ class DCGAN(object):
       top = tf.squeeze(self.D_logits_real - self.D_logits_interpolate)
       
       # L2 distance between real and fake inputs
-      bot = tf.squeeze(tf.sqrt(tf.reduce_sum(tf.square(inputs - self.G_interpolate), axis=[1,2,3])))
+      bot = l2norm(inputs - self.G_interpolate)
 
       # If bot == 0 return 0, else return top / bot
       diff_penalty = tf.where(tf.less(bot, 10e-9 * tf.ones_like(top,dtype=tf.float32)), tf.zeros_like(top,dtype=tf.float32), tf.square(top) / bot)
@@ -212,8 +219,39 @@ class DCGAN(object):
       # Discriminator Gradient Loss Penalty
       gradients = tf.gradients(self.D_logits_interpolate, [self.G_interpolate])[0]
       slopes = tf.sqrt(tf.reduce_sum(tf.square(gradients), reduction_indices=[1,2,3]))
-      gradient_penalty = tf.reduce_mean(tf.square(slopes-(1. / (2. * self.lipschitz_penalty))))
+
+      if self.calculate_slope:
+        # this whole bit calculates the formula
+        #\frac{
+        #\left\Vert\mathbb E_{\tilde x\sim\mathbb P}[(\tilde x- x')\frac{f(\tilde x)-f(x')}{\Vert x'-\tilde x\Vert^3}]\right\Vert}
+        #{\mathbb E_{\tilde x\sim\mathbb P}[\frac{1}{\Vert x'-\tilde x\Vert}]})
+        #
+        # by doing a mapping that (batch wise) outputs everything that needs to be summed up to calculate the expected
+        # value in both the bottom and top part of the formula
+        def map_function(map_pack):
+          map_G_interpolate, map_logits_interpolate = map_pack
+          map_input_difference = inputs - map_G_interpolate
+          map_norm = l2norm(map_input_difference) + 10e-7
+          map_bot = tf.squeeze(tf.pow(map_norm , -3))
+          map_top = tf.squeeze(tf.stop_gradient(self.D_logits_real) - map_logits_interpolate)
+          first_output = map_input_difference * tf.reshape(map_top * map_bot, [self.batch_size, 1, 1, 1])
+          first_output = tf.reduce_mean(tf.norm(first_output))
+
+          second_output = tf.reduce_mean(tf.pow(map_norm , -1))
+
+          return tf.maximum(0., first_output / second_output)
+
+        d_slope_target = tf.map_fn(map_function,
+                                   (tf.stop_gradient(self.G_interpolate), tf.stop_gradient(self.D_logits_interpolate)),
+                                   back_prop=False,
+                                   dtype=tf.float32)
+ 
+      else:
+        d_slope_target = (1. / (2. * self.lipschitz_penalty))
+
+      gradient_penalty = tf.reduce_mean(tf.square(slopes-tf.minimum(1. / (2. * self.lipschitz_penalty), d_slope_target)))
       self.d_gradient_penalty_loss = self.gradient_penalty * gradient_penalty
+      self.d_mean_slope_target = tf.reduce_mean(d_slope_target)
 
     if self.gan_method == 'improved_wgan':
       # Discriminator Loss Real and Fake
@@ -231,7 +269,7 @@ class DCGAN(object):
       interpolates = alpha*inputs + ((1-alpha)*self.G)
       _, disc_interpolates = self.discriminator(interpolates, reuse=True)
       gradients = tf.gradients(disc_interpolates, [interpolates])[0]
-      slopes = tf.sqrt(tf.reduce_sum(tf.square(gradients), reduction_indices=[1,2,3]))
+      slopes = l2norm(gradients)
       gradient_penalty = tf.reduce_mean(tf.square(slopes-1.))
       self.d_gradient_penalty_loss = self.gradient_penalty * gradient_penalty
 
@@ -300,7 +338,7 @@ class DCGAN(object):
     # Init:
     tf.global_variables_initializer().run()
     self.coord = tf.train.Coordinator()
-    tf.train.start_queue_runners(self.sess, self.coord)
+    self.threads = tf.train.start_queue_runners(self.sess, self.coord)
 
     # Summaries
     self.g_sum = tf.summary.merge([self.z_sum, self.d_fake_sum,
@@ -349,6 +387,7 @@ class DCGAN(object):
     errG = 0.
     penD_gradient = 0.
     penD_lipschitz = 0.
+    esti_slope = 0.
 
     start_time = time.time()
 
@@ -365,9 +404,9 @@ class DCGAN(object):
         # Loop over batches
         for batch_idx in range(batch_nums):
           # Update D network
-          _, errD_fake_, errD_real_, summary_str, penD_gradient_, penD_lipschitz_ = self.sess.run(
+          _, errD_fake_, errD_real_, summary_str, penD_gradient_, penD_lipschitz_, esti_slope_ = self.sess.run(
               [self.d_optim, self.d_loss_fake, self.d_loss_real, self.d_sum,
-              self.d_gradient_penalty_loss, self.d_lipschitz_penalty_loss])
+              self.d_gradient_penalty_loss, self.d_lipschitz_penalty_loss, self.d_mean_slope_target])
           for i in range(self.num_discriminator_updates - 1):
             self.sess.run([self.d_optim, self.d_loss_fake, self.d_loss_real, self.d_sum,
                            self.d_gradient_penalty_loss, self.d_lipschitz_penalty_loss])
@@ -384,17 +423,19 @@ class DCGAN(object):
           errG += errG_
           penD_gradient += penD_gradient_
           penD_lipschitz += penD_lipschitz_
+          esti_slope += esti_slope_
 
           # Print
           if np.mod(counter, 100) == 0:
-            print("Epoch: [%2d] [%4d/%4d] time: %4.4f, d_loss: %.8f, lipschitz_pen: %.8f, gradient_pen: %.8f, g_loss: %.8f" \
+            print("Epoch: [%2d] [%4d/%4d] time: %4.4f, d_loss: %.8f, lipschitz_pen: %.8f, gradient_pen: %.8f, g_loss: %.8f, d_target_slope: %.8f"  \
               % (epoch, batch_idx, batch_nums, time.time() - start_time, (errD_fake+errD_real) / 100.,
-                 penD_lipschitz / 100., penD_gradient / 100., errG / 100.))
+                 penD_lipschitz / 100., penD_gradient / 100., errG / 100., esti_slope / 100.))
             errD_fake = 0.
             errD_real = 0.
             errG = 0.
             penD_gradient = 0.
             penD_lipschitz = 0.
+            esti_slope = 0.
 
           # Save generated samples and FID
           if np.mod(counter, config.fid_eval_steps) == 0:
@@ -454,6 +495,7 @@ class DCGAN(object):
     finally:
       # When done, ask the threads to stop.
       self.coord.request_stop()
+      self.coord.join(self.threads)
 
   # Discriminator
   def discriminator(self, image, y=None, reuse=False):

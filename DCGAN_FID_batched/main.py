@@ -88,7 +88,7 @@ def main(_):
     os.makedirs(FLAGS.sample_dir)
 
   run_config = tf.ConfigProto()
-  run_config.gpu_options.allow_growth=True
+  run_config.gpu_options.allow_growth=False
 
   # load model
   fid.create_inception_graph(FLAGS.incept_path)
