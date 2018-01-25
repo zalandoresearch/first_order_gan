@@ -197,6 +197,7 @@ class DCGAN(object):
     self.d_lipschitz_penalty_loss = tf.zeros([])
     self.d_gradient_penalty_loss  = tf.zeros([])
     self.d_mean_slope_target      = tf.zeros([])
+    self.d_lipschitz_estimate     = tf.zeros([])
 
     if self.gan_method == 'penalized_wgan':    
       # Discriminator Loss Real and Fake
@@ -214,6 +215,7 @@ class DCGAN(object):
 
       # If bot == 0 return 0, else return top / bot
       diff_penalty = tf.where(tf.less(bot, 10e-9 * tf.ones_like(top,dtype=tf.float32)), tf.zeros_like(top,dtype=tf.float32), tf.square(top) / bot)
+      self.d_lipschitz_estimate = tf.reduce_mean(tf.where(tf.less(bot, 10e-9 * tf.ones_like(top,dtype=tf.float32)), tf.zeros_like(top,dtype=tf.float32), top / bot))
       self.d_lipschitz_penalty_loss = self.lipschitz_penalty * tf.reduce_mean(diff_penalty)
 
       # Discriminator Gradient Loss Penalty
@@ -229,13 +231,26 @@ class DCGAN(object):
         # by doing a mapping that (batch wise) outputs everything that needs to be summed up to calculate the expected
         # value in both the bottom and top part of the formula
         def map_function(map_pack):
-          map_G_interpolate, map_logits_interpolate = map_pack
+          map_G_interpolate, map_g_logits_interpolate = map_pack
           map_input_difference = inputs - map_G_interpolate
           map_norm = l2norm(map_input_difference) + 10e-7
           map_bot = tf.squeeze(tf.pow(map_norm , -3))
-          map_top = tf.squeeze(tf.stop_gradient(self.D_logits_real) - map_logits_interpolate)
+          map_top = tf.squeeze(tf.stop_gradient(self.D_logits_real) - map_g_logits_interpolate)
           first_output = map_input_difference * tf.reshape(map_top * map_bot, [self.batch_size, 1, 1, 1])
-          first_output = tf.reduce_mean(tf.norm(first_output))
+          first_output = tf.norm(tf.reduce_mean(first_output, axis=[0]))
+
+          second_output = tf.reduce_mean(tf.pow(map_norm , -1))
+
+          return tf.maximum(0., first_output / second_output)
+
+        def map_function_alt(map_pack):
+          map_G_interpolate, map_g_logits_interpolate = map_pack
+          map_input_difference = inputs - map_G_interpolate
+          map_norm = l2norm(map_input_difference) + 10e-7
+          map_bot = tf.squeeze(tf.pow(map_norm , -2))
+          map_top = 1 / (2 * self.lipschitz_penalty)
+          first_output = map_input_difference * tf.reshape(map_top * map_bot, [self.batch_size, 1, 1, 1])
+          first_output = tf.norm(tf.reduce_mean(first_output, axis=[0]))
 
           second_output = tf.reduce_mean(tf.pow(map_norm , -1))
 
@@ -249,7 +264,8 @@ class DCGAN(object):
       else:
         d_slope_target = (1. / (2. * self.lipschitz_penalty))
 
-      gradient_penalty = tf.reduce_mean(tf.square(slopes-tf.minimum(1. / (2. * self.lipschitz_penalty), d_slope_target)))
+      gradient_penalty = tf.reduce_mean(tf.square(slopes - d_slope_target))
+      #gradient_penalty = tf.reduce_mean(tf.square(slopes - d_slope_target))
       self.d_gradient_penalty_loss = self.gradient_penalty * gradient_penalty
       self.d_mean_slope_target = tf.reduce_mean(d_slope_target)
 
@@ -385,9 +401,11 @@ class DCGAN(object):
     errD_fake = 0.
     errD_real = 0.
     errG = 0.
+    errG_count = 0
     penD_gradient = 0.
     penD_lipschitz = 0.
     esti_slope = 0.
+    lipschitz_estimate = 0.
 
     start_time = time.time()
 
@@ -404,9 +422,9 @@ class DCGAN(object):
         # Loop over batches
         for batch_idx in range(batch_nums):
           # Update D network
-          _, errD_fake_, errD_real_, summary_str, penD_gradient_, penD_lipschitz_, esti_slope_ = self.sess.run(
+          _, errD_fake_, errD_real_, summary_str, penD_gradient_, penD_lipschitz_, esti_slope_, lipschitz_estimate_ = self.sess.run(
               [self.d_optim, self.d_loss_fake, self.d_loss_real, self.d_sum,
-              self.d_gradient_penalty_loss, self.d_lipschitz_penalty_loss, self.d_mean_slope_target])
+              self.d_gradient_penalty_loss, self.d_lipschitz_penalty_loss, self.d_mean_slope_target, self.d_lipschitz_estimate])
           for i in range(self.num_discriminator_updates - 1):
             self.sess.run([self.d_optim, self.d_loss_fake, self.d_loss_real, self.d_sum,
                            self.d_gradient_penalty_loss, self.d_lipschitz_penalty_loss])
@@ -414,28 +432,33 @@ class DCGAN(object):
             self.writer.add_summary(summary_str, counter)
 
           # Update G network
-          _, errG_, summary_str = self.sess.run([self.g_optim, self.g_loss, self.g_sum])
-          if np.mod(counter, 20) == 0:
-            self.writer.add_summary(summary_str, counter)
+          if config.learning_rate_g > 0.: # and (np.mod(counter, 100) == 0 or lipschitz_estimate_ > 1 / (20 * self.lipschitz_penalty)):
+            _, errG_, summary_str = self.sess.run([self.g_optim, self.g_loss, self.g_sum])
+            if np.mod(counter, 20) == 0:
+              self.writer.add_summary(summary_str, counter)
+            errG += errG_
+            errG_count += 1
 
           errD_fake += errD_fake_
           errD_real += errD_real_
-          errG += errG_
           penD_gradient += penD_gradient_
           penD_lipschitz += penD_lipschitz_
           esti_slope += esti_slope_
+          lipschitz_estimate += lipschitz_estimate_
 
           # Print
           if np.mod(counter, 100) == 0:
-            print("Epoch: [%2d] [%4d/%4d] time: %4.4f, d_loss: %.8f, lipschitz_pen: %.8f, gradient_pen: %.8f, g_loss: %.8f, d_target_slope: %.8f"  \
+            print("Epoch: [%2d] [%4d/%4d] time: %4.4f, d_loss: %.8f, lip_pen: %.8f, gradient_pen: %.8f, g_loss: %.8f, d_tgt_slope: %.6f, d_avg_lip: %.6f, g_updates: %3d"  \
               % (epoch, batch_idx, batch_nums, time.time() - start_time, (errD_fake+errD_real) / 100.,
-                 penD_lipschitz / 100., penD_gradient / 100., errG / 100., esti_slope / 100.))
+                 penD_lipschitz / 100., penD_gradient / 100., errG / 100., esti_slope / 100., lipschitz_estimate / 100., errG_count))
             errD_fake = 0.
             errD_real = 0.
             errG = 0.
+            errG_count = 0
             penD_gradient = 0.
             penD_lipschitz = 0.
             esti_slope = 0.
+            lipschitz_estimate = 0.
 
           # Save generated samples and FID
           if np.mod(counter, config.fid_eval_steps) == 0:
