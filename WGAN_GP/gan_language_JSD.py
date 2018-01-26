@@ -15,7 +15,14 @@ import tflib.plot
 
 def make_noise(shape):
     return tf.random_normal(shape)
-
+  
+def text_to_array(lines, charmap):
+  answer = np.empty((len(lines), len(lines[0])),dtype=np.int32)
+  for i,l in enumerate(lines):
+    assert answer.shape[1] == len(l), 'all lines must have same length'
+    for j,c in enumerate(l):
+      answer[i,j] = charmap[c]
+  return answer
 
 class FOGAN(object):
   def __init__(self, session,
@@ -26,7 +33,8 @@ class FOGAN(object):
                critic_iters, lr_disc,
                lr_gen, sample_dir,
                log_dir, checkpoint_dir,
-               print_interval):
+               print_interval,
+               use_fast_lang_model):
     self.session=session
     self.iterations=iterations
     self.data_dir=data_dir
@@ -43,11 +51,17 @@ class FOGAN(object):
     self.log_dir=log_dir
     self.checkpoint_dir=checkpoint_dir
     self.print_interval=print_interval
+    self.use_fast_lang_model=use_fast_lang_model
     
     self.line=None
     self.charmap=None
     self.inv_charmap=None
     
+    if self.use_fast_lang_model:
+      import ngram_language_model.ngram_language_model as language_model
+      self.NgramLanguageModel = language_model.NgramLanguageModel
+    else:
+      self.NgramLanguageModel = language_helpers.NgramLanguageModel
     self.load_data()
     self.build_model()
     self.generate_lang_model()
@@ -65,10 +79,13 @@ class FOGAN(object):
   
   def generate_lang_model(self):
     print("true char ngram lms:", end=" ", flush=True)
-    self.true_char_ngram_lms = []
-    for i in range(self.n_ngrams):
-      print(i, end=" ", flush=True)
-      self.true_char_ngram_lms.append(language_helpers.NgramLanguageModel(i+1, self.lines, tokenize=False))
+    if self.use_fast_lang_model:
+      self.true_char_ngram_lms=self.NgramLanguageModel(text_to_array(self.lines, self.charmap), self.n_ngrams, len(self.charmap))
+    else:
+      self.true_char_ngram_lms = []
+      for i in range(self.n_ngrams):
+        print(i, end=" ", flush=True)
+        self.true_char_ngram_lms.append(self.NgramLanguageModel(i+1, self.lines, tokenize=False))
     print()
 
 
@@ -153,7 +170,7 @@ class FOGAN(object):
         for j in range(len(samples[i])):
             decoded.append(self.inv_charmap[samples[i][j]])
         decoded_samples.append(tuple(decoded))
-    return decoded_samples
+    return samples, decoded_samples
 
 
   def train(self):
@@ -179,23 +196,33 @@ class FOGAN(object):
 
         # Generate samples and eval JSDs
         if iteration % 100 == 0:
-            samples = []
+            encoded_samples = []
+            decoded_samples = []
             for i in range(10):
-                samples.extend(self.generate_samples())
+                es, ds = self.generate_samples()
+                encoded_samples.extend(es)
+                decoded_samples.extend(ds)
 
             js = []
             js_string = ''
-            for i in range(self.n_ngrams):
-                lm = language_helpers.NgramLanguageModel(i+1, samples, tokenize=False)
-                js.append(lm.js_with(self.true_char_ngram_lms[i]))
+            if self.use_fast_lang_model:
+              lm = self.NgramLanguageModel(encoded_samples, self.n_ngrams, len(self.charmap))
+              for i in range(self.n_ngrams):
+                js.append(lm.js_with(self.true_char_ngram_lms, i+1))
                 js_string += ' ' + str(js[i])
+              del lm
+            else:
+              for i in range(self.n_ngrams):
+                  lm = self.NgramLanguageModel(i+1, decoded_samples, tokenize=False)
+                  js.append(lm.js_with(self.true_char_ngram_lms[i]))
+                  js_string += ' ' + str(js[i])
             print('JS=' + js_string)
             feed_dict = {k: v for k, v in zip(self.js_ph, js)}
             js_sum = self.session.run(self.js_sum_op, feed_dict=feed_dict)
             sum_writer.add_summary(js_sum, iteration)
 
             with open('%s/samples_%d.txt' % (self.sample_dir, iteration + 1), 'w', encoding='utf-8') as f:
-                for s in samples:
+                for s in decoded_samples:
                     s = "".join(s)
                     f.write(s + "\n")
 

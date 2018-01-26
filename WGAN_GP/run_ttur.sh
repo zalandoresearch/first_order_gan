@@ -16,3 +16,5 @@ python3.5 -u main.py \
 --dim=512 \
 --critic_iters=10 \
 --print_interval=10 \
+--use_fast_lang_model \
+

@@ -30,6 +30,7 @@ flags.DEFINE_string("log_dir", "logs", "Directory name for summary logs [logs]")
 flags.DEFINE_string("sample_dir", "samples", "Directory name to save the image samples [samples]")
 flags.DEFINE_string("checkpoint_dir", "checkpoint", "Directory name to save the checkpoints [checkpoint]")
 flags.DEFINE_integer("print_interval", 10, "How many iterations before printing new infromation [10]")
+flags.DEFINE_boolean("use_fast_lang_model", False, "Use the faster C++ language model (must be compiled first) [False]")
 
 FLAGS = flags.FLAGS
 
@@ -85,7 +86,8 @@ def main(_):
                   sample_dir=FLAGS.sample_dir,
                   log_dir=FLAGS.log_dir,
                   checkpoint_dir=FLAGS.checkpoint_dir,
-                  print_interval=FLAGS.print_interval)
+                  print_interval=FLAGS.print_interval,
+                  use_fast_lang_model=FLAGS.use_fast_lang_model)
     
     if FLAGS.is_train:
       fogan.train()
