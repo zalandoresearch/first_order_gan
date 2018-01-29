@@ -12,9 +12,32 @@ import tflib.ops.linear
 import tflib.ops.conv1d
 import tflib.plot
 
-
+BN_SCALE = False
 def make_noise(shape):
     return tf.random_normal(shape)
+  
+def l2norm(x, axis=[1,2]):
+    return tf.squeeze(tf.sqrt(tf.reduce_sum(tf.square(x), axis=axis)))
+  
+class batch_norm_class(object):
+  def __init__(self, scale=True, epsilon=1e-5, momentum = 0.9, name="batch_norm"):
+    with tf.variable_scope(name):
+      self.epsilon  = epsilon
+      self.momentum = momentum
+      self.name = name
+      self.scale = scale
+
+  def __call__(self, x, train=True):
+    return tf.contrib.layers.batch_norm(x,
+                      decay=self.momentum,
+                      updates_collections=None,
+                      epsilon=self.epsilon,
+                      scale=self.scale,
+                      is_training=train,
+#                      reuse=REUSE_BN,
+                      scope=self.name)
+
+
   
 def text_to_array(lines, charmap):
   answer = np.empty((len(lines), len(lines[0])),dtype=np.int32)
@@ -26,24 +49,31 @@ def text_to_array(lines, charmap):
 
 class FOGAN(object):
   def __init__(self, session,
+               gan_divergence,
                iterations, data_dir,
                seq_len, max_n_examples,
                n_ngrams, batch_size,
-               dim, lambda_,
+               dim, activation_d, 
+               lipschitz_penalty, batch_norm_d,
+               batch_norm_g,
                critic_iters, lr_disc,
                lr_gen, sample_dir,
                log_dir, checkpoint_dir,
                print_interval,
-               use_fast_lang_model):
+               num_sample_batches,
+               jsd_test_interval,
+               use_fast_lang_model,
+               gradient_penalty):
     self.session=session
     self.iterations=iterations
+    self.gan_divergence=gan_divergence
     self.data_dir=data_dir
     self.seq_len=seq_len
     self.max_n_examples=max_n_examples
     self.n_ngrams=n_ngrams
     self.batch_size=batch_size
     self.dim=dim
-    self.lambda_=lambda_
+    self.lipschitz_penalty=lipschitz_penalty
     self.critic_iters=critic_iters
     self.lr_disc=lr_disc
     self.lr_gen=lr_gen
@@ -51,7 +81,31 @@ class FOGAN(object):
     self.log_dir=log_dir
     self.checkpoint_dir=checkpoint_dir
     self.print_interval=print_interval
+    self.num_sample_batches=num_sample_batches
+    self.jsd_test_interval=jsd_test_interval
     self.use_fast_lang_model=use_fast_lang_model
+    self.gradient_penalty=gradient_penalty
+    if activation_d == "relu":
+      self.activation_d=tf.nn.relu
+    if activation_d == "elu":
+      self.activation_d=tf.nn.elu
+    
+    def stuff1(x, train=None):
+      return x
+    
+    def stuff2(scale, name): 
+        return stuff1
+      
+    if batch_norm_d:
+      self.batch_norm_d = batch_norm_class
+    else:
+      self.batch_norm_d = stuff2
+    
+    if batch_norm_g:
+      self.batch_norm_g = batch_norm_class
+    else:
+      self.batch_norm_g = stuff2
+    
     
     self.line=None
     self.charmap=None
@@ -96,11 +150,30 @@ class FOGAN(object):
     # Inputs
     self.real_inputs_discrete = tf.placeholder(tf.int32, shape=[self.batch_size, self.seq_len])
     real_inputs = tf.one_hot(self.real_inputs_discrete, len(self.charmap))
-    self.fake_inputs = self.Generator(self.batch_size)
-    
+    with tf.variable_scope("Generator.") as scope:
+      self.fake_inputs = self.Generator(self.batch_size, train=True)
+    with tf.variable_scope("Generator.") as scope:
+      scope.reuse_variables()
+      self.fake_samples = self.Generator(self.batch_size, train=False)
     # Disc prop
-    disc_real = self.Discriminator(real_inputs)
-    disc_fake = self.Discriminator(self.fake_inputs)
+    with tf.variable_scope("Discriminator.") as scope:
+      disc_real = self.Discriminator(real_inputs)
+    if self.gan_divergence == 'PWGAN' or self.gan_divergence == 'FOGAN':
+      # WGAN lipschitz-penalty
+      alpha = tf.random_uniform(
+          shape=[self.batch_size,1,1],
+          minval=0.99,
+          maxval=1.0
+      )
+      differences = self.fake_inputs - real_inputs
+      interpolates = real_inputs + (alpha*differences)
+      with tf.variable_scope("Discriminator.") as scope:
+        scope.reuse_variables()
+        disc_fake = self.Discriminator(interpolates)
+    else:
+      with tf.variable_scope("Discriminator.") as scope:
+        scope.reuse_variables()
+        disc_fake = self.Discriminator(self.fake_inputs)
 
 
     # Costs & summaries
@@ -121,18 +194,60 @@ class FOGAN(object):
 
     self.js_sum_op = tf.summary.merge(js_sums)
 
-    # WGAN lipschitz-penalty
-    alpha = tf.random_uniform(
-        shape=[self.batch_size,1,1],
-        minval=0.,
-        maxval=1.
-    )
-    differences = self.fake_inputs - real_inputs
-    interpolates = real_inputs + (alpha*differences)
-    gradients = tf.gradients(self.Discriminator(interpolates), [interpolates])[0]
-    slopes = tf.sqrt(tf.reduce_sum(tf.square(gradients), reduction_indices=[1,2]))
-    gradient_penalty = tf.reduce_mean((slopes-1.)**2)
-    self.disc_cost += self.lambda_*gradient_penalty
+    if self.gan_divergence == 'WGANGP':
+      # WGAN lipschitz-penalty
+      alpha = tf.random_uniform(
+          shape=[self.batch_size,1,1],
+          minval=0.,
+          maxval=1.
+      )
+      differences = self.fake_inputs - real_inputs
+      interpolates = real_inputs + (alpha*differences)
+      with tf.variable_scope("Discriminator.") as scope:
+        scope.reuse_variables()
+        disc_int = self.Discriminator(interpolates)
+      gradients = tf.gradients(disc_int, [interpolates])[0]
+      slopes = tf.sqrt(tf.reduce_sum(tf.square(gradients), reduction_indices=[1,2]))
+      gradient_penalty = tf.reduce_mean((slopes-1.)**2)
+      self.disc_cost += self.gradient_penalty*gradient_penalty
+    
+    if self.gan_divergence in ['PWGAN', 'FOGAN']:
+      top = tf.squeeze(disc_real - disc_fake)
+      bot = tf.squeeze(tf.sqrt(tf.reduce_sum(tf.square(real_inputs - interpolates), axis=[1,2])))
+  
+      diff_penalty = tf.where(tf.less(bot, 10e-9 * tf.ones_like(top,dtype=tf.float32)), tf.zeros_like(top,dtype=tf.float32), tf.square(top) / bot)
+      self.disc_cost += self.lipschitz_penalty * tf.reduce_mean(diff_penalty)
+
+      if self.gan_divergence == 'FOGAN':
+        # this whole bit calculates the formula
+        #\frac{
+        #\left\Vert\mathbb E_{\tilde x\sim\mathbb P}[(\tilde x- x')\frac{f(\tilde x)-f(x')}{\Vert x'-\tilde x\Vert^3}]\right\Vert}
+        #{\mathbb E_{\tilde x\sim\mathbb P}[\frac{1}{\Vert x'-\tilde x\Vert}]})
+        #
+        # by doing a mapping that (batch wise) outputs everything that needs to be summed up to calculate the expected
+        # value in both the bottom and top part of the formula
+        def map_function(map_pack):
+          map_G_interpolate, map_g_logits_interpolate = map_pack
+          map_input_difference = real_inputs - map_G_interpolate
+          map_norm = l2norm(map_input_difference) + 10e-7
+          map_bot = tf.squeeze(tf.pow(map_norm , -3))
+          map_top = tf.squeeze(disc_real - map_g_logits_interpolate)
+          first_output = map_input_difference * tf.reshape(map_top * map_bot, [self.batch_size, 1, 1])
+          first_output = tf.norm(tf.reduce_mean(first_output, axis=[0]))
+
+          second_output = tf.reduce_mean(tf.pow(map_norm , -1))
+
+          return first_output / second_output
+        
+        d_slope_target = tf.map_fn(map_function,
+                                   (tf.stop_gradient(interpolates), tf.stop_gradient(disc_fake)),
+                                   back_prop=False,
+                                   dtype=tf.float32)
+        
+        gradients = tf.gradients(disc_fake, [interpolates])[0]
+        slopes = tf.sqrt(tf.reduce_sum(tf.square(gradients), reduction_indices=[1,2]))
+        self.disc_cost += self.gradient_penalty * tf.reduce_mean(tf.square(slopes - d_slope_target))
+
 
     disc_cost_opt_sum = tf.summary.scalar("bill disc cost opt", self.disc_cost)
 
@@ -162,7 +277,7 @@ class FOGAN(object):
             )
 
   def generate_samples(self):
-    samples = self.session.run(self.fake_inputs)
+    samples = self.session.run(self.fake_samples)
     samples = np.argmax(samples, axis=2)
     decoded_samples = []
     for i in range(len(samples)):
@@ -195,10 +310,10 @@ class FOGAN(object):
         start_time = time.time()
 
         # Generate samples and eval JSDs
-        if iteration % 100 == 0:
+        if iteration % self.jsd_test_interval == 0:
             encoded_samples = []
             decoded_samples = []
-            for i in range(10):
+            for i in range(self.num_sample_batches):
                 es, ds = self.generate_samples()
                 encoded_samples.extend(es)
                 decoded_samples.extend(ds)
@@ -230,7 +345,12 @@ class FOGAN(object):
         train_start_time = time.time()
         # Train generator
         if iteration > 0:
-          summary_string, _ = self.session.run([self.gen_sums_op, self.gen_train_op])
+          if self.gan_divergence in ['PWGAN', 'FOGAN']:
+            _data = gen.__next__()
+            summary_string, _ = self.session.run([self.gen_sums_op, self.gen_train_op],
+                                                 feed_dict={self.real_inputs_discrete:_data})
+          else:
+            summary_string, _ = self.session.run([self.gen_sums_op, self.gen_train_op])
           sum_writer.add_summary(summary_string, iteration)
 
         # Train critic
@@ -253,16 +373,16 @@ class FOGAN(object):
         train_time_sum += time.time() - train_start_time
         if iteration % self.print_interval == 0:
           print('iteration '+ str(iteration) + \
-                ' time ' + str(time_sum / self.print_interval) + \
-                ' train_time ' + str(train_time_sum / self.print_interval))
+                ' time ' + str(time_sum) + \
+                ' train_time ' + str(train_time_sum))
           print('train disc cost', _disc_cost_sum / (self.print_interval * self.critic_iters), flush=True)
           
           time_sum = 0
           train_time_sum = 0
           _disc_cost_sum=0
 
-        if iteration > 0 and iteration % 1000 == 0:
-          saver.save(session, '%s/model' % (self.checkpoint_dir, ), global_step=iteration)
+        if iteration > 0 and iteration % 10000 == 0:
+          saver.save(self.session, '%s/model' % (self.checkpoint_dir, ), global_step=iteration)
         
         iteration += 1
     except KeyboardInterrupt:
@@ -277,36 +397,63 @@ class FOGAN(object):
           tf.shape(logits)
       )
 
-  def ResBlock(self, name, inputs):
+  def ResBlock(self, name, activation, inputs, bn1=tf.identity, bn2=tf.identity, train=True):
       output = inputs
-      output = tf.nn.relu(output)
-      output = lib.ops.conv1d.Conv1D(name+'.1', self.dim, self.dim, 5, output)
-      output = tf.nn.relu(output)
-      output = lib.ops.conv1d.Conv1D(name+'.2', self.dim, self.dim, 5, output)
+      output = activation(output)
+      output = bn1(lib.ops.conv1d.Conv1D(name+'.1', self.dim, self.dim, 5, output), train=train)
+      output = activation(output)
+      output = bn2(lib.ops.conv1d.Conv1D(name+'.2', self.dim, self.dim, 5, output), train=train)
       return inputs + (0.3 * output)
 
-  def Generator(self, n_samples, prev_outputs=None):
-      output = make_noise(shape=[n_samples, 128])
-      output = lib.ops.linear.Linear('Generator.Input', 128, self.seq_len*self.dim, output)
+  def Generator(self, n_samples, prev_outputs=None, train=True):
+      g_bn0 = self.batch_norm_g(scale=BN_SCALE, name='Generator.g_bn0')
+      g_bn1 = self.batch_norm_g(scale=BN_SCALE, name='Generator.g_bn1')
+      g_bn2 = self.batch_norm_g(scale=BN_SCALE, name='Generator.g_bn2')
+      g_bn3 = self.batch_norm_g(scale=BN_SCALE, name='Generator.g_bn3')
+      g_bn4 = self.batch_norm_g(scale=BN_SCALE, name='Generator.g_bn4')
+      g_bn5 = self.batch_norm_g(scale=BN_SCALE, name='Generator.g_bn5')
+      g_bn6 = self.batch_norm_g(scale=BN_SCALE, name='Generator.g_bn6')
+      g_bn7 = self.batch_norm_g(scale=BN_SCALE, name='Generator.g_bn7')
+      g_bn8 = self.batch_norm_g(scale=BN_SCALE, name='Generator.g_bn8')
+      g_bn9 = self.batch_norm_g(scale=BN_SCALE, name='Generator.g_bn9')
+      g_bn10 = self.batch_norm_g(scale=BN_SCALE, name='Generator.g_bn10')
+      g_bn11 = self.batch_norm_g(scale=BN_SCALE, name='Generator.g_bn11')
+      g_bn12 = self.batch_norm_g(scale=BN_SCALE, name='Generator.g_bn12')
+    
+      output = g_bn0(make_noise(shape=[n_samples, 128]))
+      output = g_bn1(lib.ops.linear.Linear('Generator.Input', 128, self.seq_len*self.dim, output))
       output = tf.reshape(output, [-1, self.dim, self.seq_len])
-      output = self.ResBlock('Generator.1', output)
-      output = self.ResBlock('Generator.2', output)
-      output = self.ResBlock('Generator.3', output)
-      output = self.ResBlock('Generator.4', output)
-      output = self.ResBlock('Generator.5', output)
+      output = self.ResBlock('Generator.1', tf.nn.relu, output, g_bn2, g_bn3, train)
+      output = self.ResBlock('Generator.2', tf.nn.relu, output, g_bn4, g_bn5, train)
+      output = self.ResBlock('Generator.3', tf.nn.relu, output, g_bn6, g_bn7, train)
+      output = self.ResBlock('Generator.4', tf.nn.relu, output, g_bn8, g_bn9, train)
+      output = self.ResBlock('Generator.5', tf.nn.relu, output, g_bn10, g_bn11, train)
       output = lib.ops.conv1d.Conv1D('Generator.Output', self.dim, len(self.charmap), 1, output)
       output = tf.transpose(output, [0, 2, 1])
       output = self.softmax(output)
       return output
 
   def Discriminator(self, inputs):
+      d_bn1 = self.batch_norm_d(scale=BN_SCALE, name='d_bn1')
+      d_bn2 = self.batch_norm_d(scale=BN_SCALE, name='d_bn2')
+      d_bn3 = self.batch_norm_d(scale=BN_SCALE, name='d_bn3')
+      d_bn4 = self.batch_norm_d(scale=BN_SCALE, name='d_bn4')
+      d_bn5 = self.batch_norm_d(scale=BN_SCALE, name='d_bn5')
+      d_bn6 = self.batch_norm_d(scale=BN_SCALE, name='d_bn6')
+      d_bn7 = self.batch_norm_d(scale=BN_SCALE, name='d_bn7')
+      d_bn8 = self.batch_norm_d(scale=BN_SCALE, name='d_bn8')
+      d_bn9 = self.batch_norm_d(scale=BN_SCALE, name='d_bn9')
+      d_bn10 = self.batch_norm_d(scale=BN_SCALE, name='d_bn10')
+      d_bn11 = self.batch_norm_d(scale=BN_SCALE, name='d_bn11')
+
+    
       output = tf.transpose(inputs, [0,2,1])
-      output = lib.ops.conv1d.Conv1D('Discriminator.Input', len(self.charmap), self.dim, 1, output)
-      output = self.ResBlock('Discriminator.1', output)
-      output = self.ResBlock('Discriminator.2', output)
-      output = self.ResBlock('Discriminator.3', output)
-      output = self.ResBlock('Discriminator.4', output)
-      output = self.ResBlock('Discriminator.5', output)
+      output = d_bn1(lib.ops.conv1d.Conv1D('Discriminator.Input', len(self.charmap), self.dim, 1, output))
+      output = self.ResBlock('Discriminator.1', self.activation_d, output, d_bn2, d_bn3)
+      output = self.ResBlock('Discriminator.2', self.activation_d, output, d_bn4, d_bn5)
+      output = self.ResBlock('Discriminator.3', self.activation_d, output, d_bn6, d_bn7)
+      output = self.ResBlock('Discriminator.4', self.activation_d, output, d_bn8, d_bn9)
+      output = self.ResBlock('Discriminator.5', self.activation_d, output, d_bn10, d_bn11)
       output = tf.reshape(output, [-1, self.seq_len * self.dim])
       output = lib.ops.linear.Linear('Discriminator.Output', self.seq_len * self.dim, 1, output)
       return output
