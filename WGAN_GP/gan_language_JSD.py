@@ -50,6 +50,7 @@ def text_to_array(lines, charmap):
 class FOGAN(object):
   def __init__(self, session,
                gan_divergence,
+               squared_divergence,
                iterations, data_dir,
                seq_len, max_n_examples,
                n_ngrams, batch_size,
@@ -67,6 +68,7 @@ class FOGAN(object):
     self.session=session
     self.iterations=iterations
     self.gan_divergence=gan_divergence
+    self.squared_divergence=squared_divergence
     self.data_dir=data_dir
     self.seq_len=seq_len
     self.max_n_examples=max_n_examples
@@ -213,8 +215,11 @@ class FOGAN(object):
     
     if self.gan_divergence in ['PWGAN', 'FOGAN']:
       top = tf.squeeze(disc_real - disc_fake)
-      bot = tf.squeeze(tf.sqrt(tf.reduce_sum(tf.square(real_inputs - interpolates), axis=[1,2])))
-  
+      if self.squared_divergence:
+        bot = tf.squeeze(tf.reduce_sum(tf.square(real_inputs - interpolates), axis=[1,2]))
+      else:
+        bot = tf.squeeze(tf.sqrt(tf.reduce_sum(tf.square(real_inputs - interpolates), axis=[1,2])))
+      
       diff_penalty = tf.where(tf.less(bot, 10e-9 * tf.ones_like(top,dtype=tf.float32)), tf.zeros_like(top,dtype=tf.float32), tf.square(top) / bot)
       self.disc_cost += self.lipschitz_penalty * tf.reduce_mean(diff_penalty)
 
@@ -229,8 +234,12 @@ class FOGAN(object):
         def map_function(map_pack):
           map_G_interpolate, map_g_logits_interpolate = map_pack
           map_input_difference = real_inputs - map_G_interpolate
-          map_norm = l2norm(map_input_difference) + 10e-7
-          map_bot = tf.squeeze(tf.pow(map_norm , -3))
+          if self.squared_divergence:
+            map_norm = tf.reduce_sum(tf.square(map_input_difference), axis=[1,2]) + 10e-7
+            map_bot = tf.squeeze(tf.pow(map_norm , -2))
+          else:
+            map_norm = l2norm(map_input_difference) + 10e-7
+            map_bot = tf.squeeze(tf.pow(map_norm , -3))
           map_top = tf.squeeze(disc_real - map_g_logits_interpolate)
           first_output = map_input_difference * tf.reshape(map_top * map_bot, [self.batch_size, 1, 1])
           first_output = tf.norm(tf.reduce_mean(first_output, axis=[0]))

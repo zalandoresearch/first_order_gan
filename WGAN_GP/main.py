@@ -16,6 +16,7 @@ flags = tf.app.flags
 # fill in the path to the extracted files here!
 flags.DEFINE_integer("iterations", 200000, "Now many iterations to train for [200000]")
 flags.DEFINE_string("gan_divergence", "WGANGP", "divergence to use, can be 'WGANGP', 'PWGAN' or 'FOGAN' ['WGANGP']")
+flags.DEFINE_boolean("squared_divergence", False, "Optimized something close to squred Wasserstein distance")
 flags.DEFINE_string("data_path", "data", "path to the extracted data files [data]")
 flags.DEFINE_integer("seq_len", 32, "Sequence length in characters [32]")
 flags.DEFINE_integer("max_n_examples", 10000000, "Max number of data examples to load. Lower for faster loading [10000000]")
@@ -29,7 +30,7 @@ flags.DEFINE_integer("critic_iters", 10, "How many critic iterations per generat
 flags.DEFINE_float("learning_rate_d", .0001, "Learnining rate of the discriminator [1e-4]")
 flags.DEFINE_float("learning_rate_g", .0001, "Learning rate of the generator [1e-4]")
 flags.DEFINE_boolean("is_train", False, "True for training, False for testing [False]")
-flags.DEFINE_float("lipschitz_penalty", 10.0, "Weight of gradient penelty")
+flags.DEFINE_float("lipschitz_penalty", 10.0, "Weight of lipschitz penelty")
 flags.DEFINE_float("gradient_penalty", 10.0, "Weight of gradient penelty")
 flags.DEFINE_string("log_dir", "logs", "Directory name for summary logs [logs]")
 flags.DEFINE_string("sample_dir", "samples", "Directory name to save the image samples [samples]")
@@ -84,6 +85,7 @@ def main(_):
     fogan = FOGAN(sess,
                   iterations=FLAGS.iterations,
                   gan_divergence=FLAGS.gan_divergence,
+                  squared_divergence=FLAGS.squared_divergence,
                   data_dir=FLAGS.data_path,
                   seq_len=FLAGS.seq_len,
                   max_n_examples=FLAGS.max_n_examples,
