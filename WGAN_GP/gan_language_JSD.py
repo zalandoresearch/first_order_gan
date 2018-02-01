@@ -47,6 +47,10 @@ def text_to_array(lines, charmap):
       answer[i,j] = charmap[c]
   return answer
 
+def smooth_relu(x, other_args=None):
+  x = tf.nn.relu(x)
+  return tf.where(tf.less(x, 1 / 2000. * tf.ones_like(x,dtype=tf.float32)), 1000 * tf.square(x), x - 1 / 4000.)
+
 class FOGAN(object):
   def __init__(self, session,
                gan_divergence,
@@ -89,9 +93,12 @@ class FOGAN(object):
     self.gradient_penalty=gradient_penalty
     if activation_d == "relu":
       self.activation_d=tf.nn.relu
-    if activation_d == "elu":
+    elif activation_d == "elu":
       self.activation_d=tf.nn.elu
-    
+    elif activation_d == "selu":
+      self.activation_d=smooth_relu
+    else:
+      raise ValueError("invalid activation_d")
     def stuff1(x, train=None):
       return x
     
@@ -255,7 +262,10 @@ class FOGAN(object):
         
         gradients = tf.gradients(disc_fake, [interpolates])[0]
         slopes = tf.sqrt(tf.reduce_sum(tf.square(gradients), reduction_indices=[1,2]))
+        #sd = tf.abs(slopes - d_slope_target)
+        #ss = tf.where(tf.less(sd, .5 * tf.ones_like(top,dtype=tf.float32)), tf.square(sd), sd-.25)
         self.disc_cost += self.gradient_penalty * tf.reduce_mean(tf.square(slopes - d_slope_target))
+        #self.disc_cost += self.gradient_penalty * tf.reduce_mean(ss)
 
 
     disc_cost_opt_sum = tf.summary.scalar("bill disc cost opt", self.disc_cost)
@@ -271,7 +281,10 @@ class FOGAN(object):
 
     # Merge gen summaries
     self.gen_sums_op = gen_cost_sum_op
-
+    #self.gen_train_op = tf.train.AdagradOptimizer(learning_rate=self.lr_gen).minimize(self.gen_cost, var_list=gen_params)
+    #self.gen_train_op = tf.train.MomentumOptimizer(learning_rate=self.lr_gen, momentum=0.9, use_nesterov=True).minimize(self.gen_cost, var_list=gen_params)
+    #self.gen_train_op = tf.train.GradientDescentOptimizer(learning_rate=self.lr_gen).minimize(self.gen_cost, var_list=gen_params)
+    #self.gen_train_op = tf.train.AdamOptimizer(learning_rate=self.lr_gen, beta1=0.25, beta2=0.8).minimize(self.gen_cost, var_list=gen_params)
     self.gen_train_op = tf.train.AdamOptimizer(learning_rate=self.lr_gen, beta1=0.5, beta2=0.9).minimize(self.gen_cost, var_list=gen_params)
     self.disc_train_op = tf.train.AdamOptimizer(learning_rate=self.lr_disc, beta1=0.5, beta2=0.9).minimize(self.disc_cost, var_list=disc_params)
 
@@ -305,13 +318,17 @@ class FOGAN(object):
     sum_writer = tf.summary.FileWriter(self.log_dir, self.session.graph)
 
     gen = self.inf_train_gen()
-    
+
     _disc_cost_sum = 0
+    _disc_cost = 0
     _gen_cost_sum = 0
     time_sum = 0
     train_time_sum = 0
+    gen_update_sum = 0
     
     iteration = 0
+    big_average_disc = np.zeros(200)
+    small_average_disc = np.zeros(20)
     # Run
     try:
       while(iteration < self.iterations):
@@ -353,13 +370,14 @@ class FOGAN(object):
         
         train_start_time = time.time()
         # Train generator
-        if iteration > 0:
+        if iteration > 0: # and _disc_cost < .95 * np.mean(big_average_disc) and np.mean(small_average_disc) < .95 * np.mean(big_average_disc):
           if self.gan_divergence in ['PWGAN', 'FOGAN']:
             _data = gen.__next__()
             summary_string, _ = self.session.run([self.gen_sums_op, self.gen_train_op],
                                                  feed_dict={self.real_inputs_discrete:_data})
           else:
             summary_string, _ = self.session.run([self.gen_sums_op, self.gen_train_op])
+          gen_update_sum += 1
           sum_writer.add_summary(summary_string, iteration)
 
         # Train critic
@@ -375,6 +393,8 @@ class FOGAN(object):
             [self.disc_cost, self.disc_sums_op, self.disc_train_op],
             feed_dict={self.real_inputs_discrete:_data}
         )
+        big_average_disc[iteration % len(big_average_disc)] = min(_disc_cost,0)
+        small_average_disc[iteration % len(small_average_disc)] = _disc_cost
         _disc_cost_sum += _disc_cost
         sum_writer.add_summary(summary_string, iteration)
 
@@ -383,11 +403,13 @@ class FOGAN(object):
         if iteration % self.print_interval == 0:
           print('iteration '+ str(iteration) + \
                 ' time ' + str(time_sum) + \
-                ' train_time ' + str(train_time_sum))
+                ' train_time ' + str(train_time_sum) + \
+                ' num_gen_updates = ' + str(gen_update_sum))
           print('train disc cost', _disc_cost_sum / (self.print_interval * self.critic_iters), flush=True)
           
           time_sum = 0
           train_time_sum = 0
+          gen_update_sum = 0
           _disc_cost_sum=0
 
         if iteration > 0 and iteration % 10000 == 0:
