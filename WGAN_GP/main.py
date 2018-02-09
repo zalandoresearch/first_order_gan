@@ -35,10 +35,12 @@ flags.DEFINE_float("gradient_penalty", 10.0, "Weight of gradient penelty")
 flags.DEFINE_string("log_dir", "logs", "Directory name for summary logs [logs]")
 flags.DEFINE_string("sample_dir", "samples", "Directory name to save the image samples [samples]")
 flags.DEFINE_string("checkpoint_dir", "checkpoint", "Directory name to save the checkpoints [checkpoint]")
+flags.DEFINE_string("load_checkpoint_dir", "load_checkpoint", "load model from this")
 flags.DEFINE_integer("print_interval", 10, "How many iterations before printing new infromation [10]")
 flags.DEFINE_integer("num_sample_batches", 10, "How many batches to sample for JSD (important since JSD estimation is biased) [10]")
 flags.DEFINE_integer("jsd_test_interval", 100, "Number of training iters between JSD calculations [100]")
 flags.DEFINE_boolean("use_fast_lang_model", False, "Use the faster C++ language model (must be compiled first) [False]")
+flags.DEFINE_integer("eval_sample_runs", 1, "number of eval sample runs to do [1]")
 
 FLAGS = flags.FLAGS
 
@@ -46,7 +48,7 @@ FLAGS = flags.FLAGS
 def main(_):
   
   assert FLAGS.gan_divergence in ['WGANGP', 'FOGAN', 'PWGAN'], "FLAGS.gan_divergence must be either 'WGANGP', 'PWGAN' or 'FOGAN'"
-  assert FLAGS.activation_d in ['relu', 'elu'], "FLAGS.gan_divergence must be either 'relu' or 'elu'"
+  assert FLAGS.activation_d in ['relu', 'elu', 'selu'], "FLAGS.gan_divergence must be either 'relu' or 'elu'"
   
   timestamp = time.strftime("%m%d_%H%M%S")
   DIR = "/%s_%6f_%.6f" % (timestamp, FLAGS.learning_rate_d, FLAGS.learning_rate_g)
@@ -56,26 +58,27 @@ def main(_):
   
   pp.pprint(flags.FLAGS.__flags)
   # Create directories if necessary
-  if not os.path.exists(FLAGS.log_dir):
+  if FLAGS.is_train and not os.path.exists(FLAGS.log_dir):
     print("*** create log dir %s" % FLAGS.log_dir)
     os.makedirs(FLAGS.log_dir)
-  if not os.path.exists(FLAGS.sample_dir):
+  if FLAGS.is_train and not os.path.exists(FLAGS.sample_dir):
     print("*** create sample dir %s" % FLAGS.sample_dir)
     os.makedirs(FLAGS.sample_dir)
-  if not os.path.exists(FLAGS.checkpoint_dir):
+  if FLAGS.is_train and not os.path.exists(FLAGS.checkpoint_dir):
     print("*** create checkpoint dir %s" % FLAGS.checkpoint_dir)
     os.makedirs(FLAGS.checkpoint_dir)
 
   # Write flags to log dir
-  flags_file = open("%s/flags.txt" % FLAGS.log_dir, "w")
-  for k, v in flags.FLAGS.__flags.items():
-        line = '{}, {}'.format(k, v)
-        print(line, file=flags_file)
-  flags_file.close()
+  if FLAGS.is_train:
+    flags_file = open("%s/flags.txt" % FLAGS.log_dir, "w")
+    for k, v in flags.FLAGS.__flags.items():
+          line = '{}, {}'.format(k, v)
+          print(line, file=flags_file)
+    flags_file.close()
 
-  if not os.path.exists(FLAGS.checkpoint_dir):
+  if FLAGS.is_train and not os.path.exists(FLAGS.checkpoint_dir):
     os.makedirs(FLAGS.checkpoint_dir)
-  if not os.path.exists(FLAGS.sample_dir):
+  if FLAGS.is_train and not os.path.exists(FLAGS.sample_dir):
     os.makedirs(FLAGS.sample_dir)
 
   run_config = tf.ConfigProto()
@@ -111,8 +114,9 @@ def main(_):
     if FLAGS.is_train:
       fogan.train()
     else:
-      if not fogan.load(FLAGS.checkpoint_dir):
+      if not fogan.load(FLAGS.load_checkpoint_dir):
         raise Exception("[!] Train a model first, then run test mode")
+      fogan.evaluate(FLAGS.eval_sample_runs)
 
 if __name__ == '__main__':
   tf.app.run()

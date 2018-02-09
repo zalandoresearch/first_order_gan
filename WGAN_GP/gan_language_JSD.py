@@ -419,6 +419,45 @@ class FOGAN(object):
     except KeyboardInterrupt:
       saver.save(self.session, '%s/model' % (self.checkpoint_dir, ), global_step=iteration)
 
+  # Load checkpoint
+  def load(self, checkpoint_dir):
+    saver = tf.train.Saver()
+    ckpt = tf.train.get_checkpoint_state(checkpoint_dir)
+    if ckpt and ckpt.model_checkpoint_path:
+      ckpt_name = os.path.basename(ckpt.model_checkpoint_path)
+      saver.restore(self.session, os.path.join(checkpoint_dir, ckpt_name))
+      print(" [*] Success to read {}".format(ckpt_name))
+      return True
+    else:
+      print(" [*] Failed to find a checkpoint")
+      return False
+  def evaluate(self, eval_sample_runs):
+    for i in range(eval_sample_runs):
+      self._evaluate()
+
+  def _evaluate(self):
+    js = []
+    encoded_samples = []
+    decoded_samples = []
+    for i in range(self.num_sample_batches):
+      es, ds = self.generate_samples()
+      encoded_samples.extend(es)
+      decoded_samples.extend(ds)
+    
+    js_string = ''
+    if self.use_fast_lang_model:
+      lm = self.NgramLanguageModel(encoded_samples, self.n_ngrams, len(self.charmap))
+      for i in range(self.n_ngrams):
+        js.append(lm.js_with(self.true_char_ngram_lms, i+1))
+        js_string += ' ' + str(js[i])
+      del lm
+    else:
+      for i in range(self.n_ngrams):
+        lm = self.NgramLanguageModel(i+1, decoded_samples, tokenize=False)
+        js.append(lm.js_with(self.true_char_ngram_lms[i]))
+        js_string += ' ' + str(js[i])
+    
+    print('JS=' + js_string, flush=True)
 
   def softmax(self, logits):
       return tf.reshape(
