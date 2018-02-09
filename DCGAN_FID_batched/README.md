@@ -1,6 +1,10 @@
 # DCGAN for CelebA evaluated with FID (batched version)
 
-DCGAN fork from https://github.com/carpedm20/DCGAN-tensorflow
+This is a fork of Two Timescale Update Rule
+
+https://github.com/bioinf-jku/TTUR
+
+which is a fork from https://github.com/carpedm20/DCGAN-tensorflow
 
 Precalculated real world / trainng data statistics can be downloaded from:
 http://bioinf.jku.at/research/ttur/ttur.html

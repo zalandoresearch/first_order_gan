@@ -1,4 +1,8 @@
-This is a fork of the Improved Wasserstein Implementation
+This is a fork of Two Timescale Update Rule
+
+https://github.com/bioinf-jku/TTUR
+
+which is a fork of the Improved Wasserstein Implementation
 
 https://github.com/igul222/improved_wgan_training
 

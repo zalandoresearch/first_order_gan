@@ -1,3 +1,7 @@
+This code has been copied from
+
+https://github.com/cseward/ngram_language_model
+
 
 This project defines a python and C++ API to the class NgramLanguageModel which saves ngrams efficiently and can quickly calculate statistics (like jensen shannon distance between two models). It's written in C++ for speed and has a convenient python wrapper for convenience.
 
