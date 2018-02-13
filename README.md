@@ -1,7 +1,12 @@
-# Two time-scale update rule for training GANs
+# First Order Divergence for training GANs
 
-This repository contains code accompanying the paper [GANs Trained by a Two Time-Scale Update Rule
-Converge to a Nash Equilibrium](https://arxiv.org/abs/1706.08500).
+This repository contains code accompanying the paper *First Order Generative Advesarial Netoworks*
+
+The majority of the code was copied from the repository [https://github.com/bioinf-jku/TTUR](https://github.com/bioinf-jku/TTUR)
+
+## First Order Wasserstein Divergence GAN
+The key added value of this code is its implementation two GANS that minimize not the KL-divergence or the WGAN-GP
+divergence, but the First Order Wasserstein Divergence, leading to better stability and perfomance.
 
 ## Frechet Inception Distance (FID)
 The FID is the performance measure used to evaluate the experiments in the paper. There, a detailed description can be found
@@ -22,7 +27,7 @@ the new version. The old version included a bug!
 
 ## Provided Code
 
-Requirements: TF 1.1, Python 3.x
+Requirements: TF 1.1, Python 3.x, for faster JSD estimation in language model, compile the language model code.
 
 #### fid.py
 This file contains the implementation of all necessary functions to calculate the FID. It can be used either
