@@ -1,6 +1,6 @@
 # First Order Divergence for training GANs
 
-This repository contains code accompanying the paper *First Order Generative Advesarial Netoworks*
+This repository contains code accompanying the paper [First Order Generative Advesarial Netoworks](https://arxiv.org/abs/1802.04591)
 
 The majority of the code was copied from the repository [https://github.com/bioinf-jku/TTUR](https://github.com/bioinf-jku/TTUR)
 
